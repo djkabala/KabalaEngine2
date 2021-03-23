@@ -43,54 +43,12 @@
 
 #include <Vulkanpp/vkPresentInfoKHR.h>
 
+#include <KabalaEngine/Camera/kePerspectiveCamera.h>
+
+#include <External/glm/mat4x4.hpp>
+#include <External/glm/gtc/matrix_transform.hpp>
+
 #include "cube_data.h"
-struct Matrix44f
-{
-	float _values[16];
-
-	Matrix44f()
-	{
-		//_values[0] = 1.0f;
-		//_values[1] = 0.0f;
-		//_values[2] = 0.0f;
-		//_values[3] = 0.0f;
-
-		//_values[4] = 0.0f;
-		//_values[5] = 1.0f;
-		//_values[6] = 0.0f;
-		//_values[7] = 0.0f;
-
-		//_values[8] = 0.0f;
-		//_values[9] = 0.0f;
-		//_values[10] = 1.0f;
-		//_values[11] = 0.0f;
-
-		//_values[12] = 0.0f;
-		//_values[13] = 0.0f;
-		//_values[14] = 0.0f;
-		//_values[15] = 1.0f;
-
-		_values[0] = 2.15933800f;
-		_values[1] = 0.279807597f;
-		_values[2] = 0.432366610f;
-		_values[3] = 0.431934237f;
-
-		_values[4] = 0.00000000f;
-		_values[5] = 2.33173013f;
-		_values[6] = -0.259419948f;
-		_values[7] = -0.259160519f;
-
-		_values[8]  = -1.07966900f;
-		_values[9]  = 0.559615195f;
-		_values[10] = 0.864733219f;
-		_values[11] = 0.863868475f;
-
-		_values[12] = 0.00000000f;
-		_values[13] = 0.00000000f;
-		_values[14] = 11.4873247f;
-		_values[15] = 11.5758381f;
-	}
-};
 
 struct MainVulkanObjects
 {
@@ -115,7 +73,7 @@ struct MainVulkanObjects
 vk::DevicePtr createDevice(const vk::PhysicalDevice&  physicalDevice, uint32_t queueFamilyIndex);
 vk::SwapchainKHRPtr createSwapChain(const vk::PhysicalDevice& physicalDevice, vk::SurfaceKHRPtr surface, vk::DevicePtr device, const uint32_t graphicsQueueFamilyIndex, const uint32_t presentQueueFamilyIndex, MainVulkanObjects& mainVulkanObjects);
 
-vk::BufferPtr createMVPBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, const Matrix44f& matrix);
+vk::BufferPtr createMVPBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, vk::SwapchainKHRPtr swapchain, glm::mat4x4& matrix);
 
 vk::PipelineLayoutPtr createPipelineLayout(vk::DevicePtr  device);
 vk::DescriptorSetPtr createDescriptorSet(vk::DevicePtr  device, const std::vector<vk::DescriptorSetLayoutPtr>& dsetLayouts, const std::vector<vk::DescriptorBufferInfoPtr>& descriptorBufferInfos);
@@ -171,8 +129,7 @@ int main(int argc, char* argv[])
 
 
 			//Window
-			vk::WindowPtr window = vk::Window::Create(std::wstring(L"My First Vulkan Window Class"), std::wstring(L"My First Vulkan"), 0, 0, 500, 500);
-
+			vk::WindowPtr window = vk::Window::Create(std::wstring(L"My First Vulkan Window Class"), std::wstring(L"My First Vulkan"), 0, 0, 1024, 1024);
 
 			//Surface
 			vk::SurfaceCreateInfoPtr surfaceCreateInfo = vk::SurfaceCreateInfo::Create(window);
@@ -224,8 +181,8 @@ int main(int argc, char* argv[])
 				vk::CommandBufferPtr commandBuffer(new vk::CommandBuffer(device, cmdBufferInfo));
 
                 //Create Mvp buffer, pipeline layout, and descriptor set
-                Matrix44f mvpMatrix;
-                vk::BufferPtr mvpBuffer = createMVPBuffer(device, physicalDevice, mvpMatrix);
+                glm::mat4x4 mvpMatrix;
+                vk::BufferPtr mvpBuffer = createMVPBuffer(device, physicalDevice, swapchain, mvpMatrix);
 
                 mainVulkanObjects._pipelineLayout = createPipelineLayout(device);
 
@@ -435,10 +392,32 @@ vk::DevicePtr createDevice(const vk::PhysicalDevice&  physicalDevice, uint32_t q
     return device;
 }
 
-vk::BufferPtr createMVPBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, const Matrix44f& matrix)
+vk::BufferPtr createMVPBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, vk::SwapchainKHRPtr swapchain, glm::mat4x4& modelViewProjection)
 {
+	uint32_t width = swapchain->getInfo()->getExtent().width;
+	uint32_t height = swapchain->getInfo()->getExtent().height;
+
+    float fov = glm::radians(45.0f);
+    if (width > height) {
+        fov *= static_cast<float>(height) / static_cast<float>(width);
+    }
+
+    ke::PerspectiveCameraPtr camera(new ke::PerspectiveCamera(fov,
+                                                              static_cast<float>(width) / static_cast<float>(height),
+                                                              0.1f,
+                                                              100.0f,
+                                                              glm::vec3(-5, 3, -10),
+                                                              glm::vec3(0, 0, 0), 
+                                                              glm::vec3(0, -1, 0))
+                                    );
+
+    glm::mat4x4 model = glm::mat4(1.0f);
+
+    // clang-format on
+    modelViewProjection = camera->getProjectionViewClipMatrix() * model;
+
 	std::vector<uint32_t> queueFamilyIndices;
-	vk::BufferCreateInfoPtr createInfo(new vk::BufferCreateInfo(0x0, sizeof(matrix), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE, queueFamilyIndices));
+	vk::BufferCreateInfoPtr createInfo(new vk::BufferCreateInfo(0x0, sizeof(modelViewProjection), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE, queueFamilyIndices));
 
 	vk::BufferPtr buffer(new vk::Buffer(device, createInfo, nullptr));
 
@@ -457,7 +436,7 @@ vk::BufferPtr createMVPBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physic
 	buffer->map(0, memReqs.size, 0x0, reinterpret_cast<void**>(&data));
 
 	//Copy
-	memcpy(data, &matrix, sizeof(matrix));
+	memcpy(data, &modelViewProjection, sizeof(modelViewProjection));
 
 	buffer->unmap();
 
