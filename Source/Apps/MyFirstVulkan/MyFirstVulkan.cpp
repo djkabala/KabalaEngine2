@@ -56,6 +56,8 @@ struct MainVulkanObjects
 	vk::DevicePtr   _device;
 	vk::SwapchainKHRPtr _swapChain;
 	std::vector<vk::ImageViewPtr> _swapImageViews;
+	vk::ImagePtr _msRgbImage;
+	vk::ImageViewPtr _msRgbImageView;
 	vk::ImagePtr _depthImage;
 	vk::ImageViewPtr _depthImageView;
 
@@ -78,10 +80,13 @@ vk::BufferPtr createMVPBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physic
 vk::PipelineLayoutPtr createPipelineLayout(vk::DevicePtr  device);
 vk::DescriptorSetPtr createDescriptorSet(vk::DevicePtr  device, const std::vector<vk::DescriptorSetLayoutPtr>& dsetLayouts, const std::vector<vk::DescriptorBufferInfoPtr>& descriptorBufferInfos);
 
-vk::ImagePtr createDepthBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, vk::SwapchainKHRPtr swapchain);
+vk::ImagePtr createDepthBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, vk::SwapchainKHRPtr swapchain, VkSampleCountFlagBits samples);
 vk::ImageViewPtr createDepthImageView(vk::DevicePtr  device, vk::ImagePtr  depthImage);
 
-vk::RenderPassPtr createRenderPass(vk::DevicePtr  device, vk::SwapchainKHRPtr swapchain, vk::ImagePtr depthImageView);
+vk::ImagePtr createMsRgbImage(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, vk::SwapchainKHRPtr swapchain, VkSampleCountFlagBits samples);
+vk::ImageViewPtr createMsRgbImageView(vk::DevicePtr  device, vk::ImagePtr  msRgbImage);
+
+vk::RenderPassPtr createRenderPass(vk::DevicePtr  device, vk::SwapchainKHRPtr swapchain, vk::ImagePtr depthImage, vk::ImagePtr msColorImage);
 
 std::vector<vk::PipelineShaderStageCreateInfoPtr> createShaders(vk::DevicePtr  device);
 
@@ -166,9 +171,23 @@ int main(int argc, char* argv[])
 				//Create swap chain
 				vk::SwapchainKHRPtr swapchain = createSwapChain(physicalDevice, surface, device, graphicsQueueFamilyIndex, presentQueueFamilyIndex, mainVulkanObjects);
 
+                VkPhysicalDeviceProperties deviceProperties;
+                vkGetPhysicalDeviceProperties(physicalDevice.getRaw(), &deviceProperties);
+
+                VkSampleCountFlagBits msSamples = VK_SAMPLE_COUNT_64_BIT;
+                uint32_t AAAND(deviceProperties.limits.framebufferColorSampleCounts & msSamples);
+                while((deviceProperties.limits.framebufferColorSampleCounts & msSamples) == 0)
+                {
+                    msSamples = static_cast<VkSampleCountFlagBits>(static_cast<uint32_t>(msSamples) >> 1);
+                }
+
 				//Create depth image
-				mainVulkanObjects._depthImage = createDepthBuffer(device, physicalDevice, swapchain);
+				mainVulkanObjects._depthImage = createDepthBuffer(device, physicalDevice, swapchain, msSamples);
                 mainVulkanObjects._depthImageView = createDepthImageView(device, mainVulkanObjects._depthImage);
+
+				//Create rgb image
+				mainVulkanObjects._msRgbImage = createMsRgbImage(device, physicalDevice, swapchain, msSamples);
+                mainVulkanObjects._msRgbImageView = createMsRgbImageView(device, mainVulkanObjects._msRgbImage);
 
 				/* Create a command pool to allocate our command buffer from */
 				vk::CommandPoolCreateInfoPtr cmdPoolInfo(new vk::CommandPoolCreateInfo(0x0, queueFamilyIndex));
@@ -195,7 +214,7 @@ int main(int argc, char* argv[])
                 descBufferViews.push_back(mvpBufferInfo);
                 mainVulkanObjects._descriptorSet = createDescriptorSet(device, mainVulkanObjects._pipelineLayout->getDescriptorSetLayouts(), descBufferViews);
 
-				vk::RenderPassPtr renderPass = createRenderPass(device, swapchain, mainVulkanObjects._depthImage);
+				vk::RenderPassPtr renderPass = createRenderPass(device, swapchain, mainVulkanObjects._depthImage, mainVulkanObjects._msRgbImage);
 
 				std::vector<vk::PipelineShaderStageCreateInfoPtr> shaderStages(createShaders(device));
 
@@ -508,7 +527,7 @@ vk::DescriptorSetPtr createDescriptorSet(vk::DevicePtr  device, const std::vecto
 	return descriptorSet;
 }
 
-vk::RenderPassPtr createRenderPass(vk::DevicePtr  device, vk::SwapchainKHRPtr swapchain, vk::ImagePtr depthImage)
+vk::RenderPassPtr createRenderPass(vk::DevicePtr  device, vk::SwapchainKHRPtr swapchain, vk::ImagePtr depthImage, vk::ImagePtr msColorImage)
 {
 	//vk::SemaphoreCreateInfoPtr semCreateInfo(new vk::SemaphoreCreateInfo(0x0));
 
@@ -516,40 +535,79 @@ vk::RenderPassPtr createRenderPass(vk::DevicePtr  device, vk::SwapchainKHRPtr sw
 
 	//uint32_t imageIndex(0);
 	//swapchain->acquireNextImage(uint64_t(0xFFFFFFFF), aquireImageSemaphore, nullptr, &imageIndex);
+    vk::AttachmentDescriptionPtr msColorAttachmentDesc;
 
-    vk::AttachmentDescriptionPtr colorAttachmentDesc(new vk::AttachmentDescription(0x0,
-		swapchain->getInfo()->getImageFormat(),
-		depthImage->getInfo()->getSamples(),
-		VK_ATTACHMENT_LOAD_OP_CLEAR,
-		VK_ATTACHMENT_STORE_OP_STORE,
-		VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-		VK_ATTACHMENT_STORE_OP_DONT_CARE,
-		VK_IMAGE_LAYOUT_UNDEFINED,
-		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR));
+    vk::AttachmentDescriptionPtr colorAttachmentDesc;
+
+    if (msColorImage->getInfo()->getSamples() == VK_SAMPLE_COUNT_1_BIT)
+    {
+        msColorAttachmentDesc = vk::AttachmentDescriptionPtr(new vk::AttachmentDescription(0x0,          //flags
+                                                             msColorImage->getInfo()->getFormat(),       //format
+                                                             msColorImage->getInfo()->getSamples(),      //samples
+                                                             VK_ATTACHMENT_LOAD_OP_CLEAR,                //loadOp
+                                                             VK_ATTACHMENT_STORE_OP_STORE,               //storeOp
+                                                             VK_ATTACHMENT_LOAD_OP_DONT_CARE,            //stencilLoadOp
+                                                             VK_ATTACHMENT_STORE_OP_DONT_CARE,           //stencilStoreOp
+                                                             VK_IMAGE_LAYOUT_UNDEFINED,                  //initialLayout
+                                                             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR));          //finalLayout
+    }
+    else
+    {
+        msColorAttachmentDesc = vk::AttachmentDescriptionPtr(new vk::AttachmentDescription(0x0,          //flags
+                                                             msColorImage->getInfo()->getFormat(),       //format
+                                                             msColorImage->getInfo()->getSamples(),      //samples
+                                                             VK_ATTACHMENT_LOAD_OP_CLEAR,                //loadOp
+                                                             VK_ATTACHMENT_STORE_OP_STORE,               //storeOp
+                                                             VK_ATTACHMENT_LOAD_OP_DONT_CARE,            //stencilLoadOp
+                                                             VK_ATTACHMENT_STORE_OP_DONT_CARE,           //stencilStoreOp
+                                                             VK_IMAGE_LAYOUT_UNDEFINED,                  //initialLayout
+                                                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)); //finalLayout
+
+        colorAttachmentDesc = vk::AttachmentDescriptionPtr(new vk::AttachmentDescription(0x0,          //flags
+                                                           swapchain->getInfo()->getImageFormat(),     //format
+                                                           VK_SAMPLE_COUNT_1_BIT,                      //samples
+                                                           VK_ATTACHMENT_LOAD_OP_DONT_CARE,            //loadOp
+                                                           VK_ATTACHMENT_STORE_OP_STORE,               //storeOp
+                                                           VK_ATTACHMENT_LOAD_OP_DONT_CARE,            //stencilLoadOp
+                                                           VK_ATTACHMENT_STORE_OP_DONT_CARE,           //stencilStoreOp
+                                                           VK_IMAGE_LAYOUT_UNDEFINED,                  //initialLayout
+                                                           VK_IMAGE_LAYOUT_PRESENT_SRC_KHR));          //finalLayout
+    }
 
     vk::AttachmentDescriptionPtr depthAttachmentDesc(new vk::AttachmentDescription(0x0, depthImage->getInfo()->getFormat(), depthImage->getInfo()->getSamples(), VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL));
 
-    vk::AttachmentReferencePtr colorReference(new vk::AttachmentReference(0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	std::vector<vk::AttachmentDescriptionPtr> attachments;
+	attachments.push_back(msColorAttachmentDesc);
+	attachments.push_back(depthAttachmentDesc);
+    if (msColorImage->getInfo()->getSamples() != VK_SAMPLE_COUNT_1_BIT)
+    {
+        attachments.push_back(colorAttachmentDesc);
+    }
+
+    vk::AttachmentReferencePtr msColorReference(new vk::AttachmentReference(0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
 	std::vector<vk::AttachmentReferencePtr> colorReferences;
-	colorReferences.push_back(colorReference);
+	colorReferences.push_back(msColorReference);
 
     vk::AttachmentReferencePtr depthReference(new vk::AttachmentReference(1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL));
+
+    std::vector<vk::AttachmentReferencePtr> colorResolveReferences;
+    if (msColorImage->getInfo()->getSamples() != VK_SAMPLE_COUNT_1_BIT)
+    {
+        vk::AttachmentReferencePtr colorResolveReference(new vk::AttachmentReference(2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+        colorResolveReferences.push_back(colorResolveReference);
+    }
 
     vk::SubpassDescriptionPtr subpass(new vk::SubpassDescription(0x0,
 		VK_PIPELINE_BIND_POINT_GRAPHICS,
 		std::vector<vk::AttachmentReferencePtr>(),
 		colorReferences,
-		std::vector<vk::AttachmentReferencePtr>(),
+		colorResolveReferences,
 		depthReference,
 		std::vector<uint32_t>()));
 
     // Subpass dependency to wait for wsi image acquired semaphore before starting layout transition
     vk::SubpassDependencyPtr subpassDependency(new vk::SubpassDependency(VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0));
 
-
-	std::vector<vk::AttachmentDescriptionPtr> attachments;
-	attachments.push_back(colorAttachmentDesc);
-	attachments.push_back(depthAttachmentDesc);
 
 	std::vector<vk::SubpassDescriptionPtr> subpasses;
 	subpasses.push_back(subpass);
@@ -564,7 +622,7 @@ vk::RenderPassPtr createRenderPass(vk::DevicePtr  device, vk::SwapchainKHRPtr sw
 	return renderPass;
 }
 
-vk::ImagePtr createDepthBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, vk::SwapchainKHRPtr swapchain)
+vk::ImagePtr createDepthBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, vk::SwapchainKHRPtr swapchain, VkSampleCountFlagBits samples)
 {
 	//Depth
 	const VkFormat depthFormat = VK_FORMAT_D16_UNORM;
@@ -593,7 +651,7 @@ vk::ImagePtr createDepthBuffer(vk::DevicePtr  device, vk::PhysicalDevice&  physi
 		depthExtent,
 		1,
 		1,
-		VK_SAMPLE_COUNT_1_BIT, //NUM_SAMPLES
+		samples, //NUM_SAMPLES
 		depthImageTiling,
 		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
 		VK_SHARING_MODE_EXCLUSIVE,
@@ -770,7 +828,15 @@ std::vector<vk::FramebufferPtr> createFramebuffers(vk::DevicePtr  device, vk::Re
 {
 
 	std::vector<vk::ImageViewPtr> attachments;
-	attachments.resize(2);
+    if (mainVulkanObjects._msRgbImage->getInfo()->getSamples() == VK_SAMPLE_COUNT_1_BIT)
+    {
+        attachments.resize(2);
+    }
+    else
+    {
+        attachments.resize(3);
+        attachments[0] = mainVulkanObjects._msRgbImageView;
+    }
 	attachments[1] = mainVulkanObjects._depthImageView;
 
 
@@ -779,7 +845,16 @@ std::vector<vk::FramebufferPtr> createFramebuffers(vk::DevicePtr  device, vk::Re
 	frameBuffers.reserve(numSwapImages);
     for (uint32_t i = 0; i < numSwapImages; i++)
 	{
-        attachments[0] = mainVulkanObjects._swapImageViews[i];
+        uint32_t swapImageIndex;
+        if (mainVulkanObjects._msRgbImage->getInfo()->getSamples() == VK_SAMPLE_COUNT_1_BIT)
+        {
+            swapImageIndex = 0;
+        }
+        else
+        {
+            swapImageIndex = 2;
+        }
+        attachments[swapImageIndex] = mainVulkanObjects._swapImageViews[i];
 
         vk::FramebufferCreateInfoPtr fbInfo(new vk::FramebufferCreateInfo(0x0, renderPass, attachments, swapchain->getInfo()->getExtent().width, swapchain->getInfo()->getExtent().height, 1));
 
@@ -1085,4 +1160,80 @@ void presentDraw(vk::DevicePtr device,
 #ifdef WIN32
     Sleep(seconds * 1000);
 #endif
+}
+
+vk::ImagePtr createMsRgbImage(vk::DevicePtr  device, vk::PhysicalDevice&  physicalDevice, vk::SwapchainKHRPtr swapchain, VkSampleCountFlagBits samples)
+{
+	//MsRgb
+	const VkFormat msRgbFormat = swapchain->getInfo()->getImageFormat();
+	VkFormatProperties props = physicalDevice.getPhysicalDeviceFormatProperties(msRgbFormat);
+	VkImageTiling            msRgbImageTiling;
+	if (props.linearTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+	{
+		msRgbImageTiling = VK_IMAGE_TILING_LINEAR;
+	}
+	else if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+	{
+		msRgbImageTiling = VK_IMAGE_TILING_OPTIMAL;
+	}
+	else
+	{
+		/* Try other msRgb formats? */
+		exit(-1);
+	}
+
+	VkExtent3D msRgbExtent;
+	msRgbExtent.width = swapchain->getInfo()->getExtent().width;
+	msRgbExtent.height = swapchain->getInfo()->getExtent().height;
+	msRgbExtent.depth = 1;
+	vk::ImageCreateInfoPtr msRgbImageInfo(new vk::ImageCreateInfo(VK_IMAGE_TYPE_2D,
+		msRgbFormat,
+		msRgbExtent,
+		1,
+		1,
+		samples, //NUM_SAMPLES
+		msRgbImageTiling,
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		VK_SHARING_MODE_EXCLUSIVE,
+		std::vector<uint32_t>(),
+		VK_IMAGE_LAYOUT_UNDEFINED));
+
+	vk::ImagePtr msRgbImage(new vk::Image(device, msRgbImageInfo, nullptr));
+
+	//Allocate the GPU-side memory
+	VkMemoryRequirements msRgbMemReqs = msRgbImage->getImageMemoryRequirements();
+	uint32_t memTypeIndex;
+	if (!physicalDevice.memoryTypeFromProperties(msRgbMemReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memTypeIndex))
+	{
+		//Could not find appropriate memory type
+		exit(-1);
+	}
+	vk::MemoryAllocateInfoPtr msRgbAllocInfo(new vk::MemoryAllocateInfo(msRgbMemReqs.size, memTypeIndex));
+	msRgbImage->allocate(msRgbAllocInfo);
+
+	//Bind the image memory
+	msRgbImage->bind(0);
+
+	return msRgbImage;
+}
+
+vk::ImageViewPtr createMsRgbImageView(vk::DevicePtr  device, vk::ImagePtr  msRgbImage)
+{
+	//Create an image view of the msRgb bufer
+	VkComponentMapping components;
+	VkImageSubresourceRange subresourceRange;
+	components.r = VK_COMPONENT_SWIZZLE_R;
+	components.g = VK_COMPONENT_SWIZZLE_G;
+	components.b = VK_COMPONENT_SWIZZLE_B;
+	components.a = VK_COMPONENT_SWIZZLE_A;
+	subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	subresourceRange.baseMipLevel = 0;
+	subresourceRange.levelCount = 1;
+	subresourceRange.baseArrayLayer = 0;
+	subresourceRange.layerCount = 1;
+
+	vk::ImageViewCreateInfoPtr msRgbViewCreateInfo(new vk::ImageViewCreateInfo(0x0, msRgbImage, VK_IMAGE_VIEW_TYPE_2D, msRgbImage->getInfo()->getFormat(), components, subresourceRange));
+	vk::ImageViewPtr msRgbImageView(new vk::ImageView(device, msRgbViewCreateInfo, nullptr));
+
+	return msRgbImageView;
 }
